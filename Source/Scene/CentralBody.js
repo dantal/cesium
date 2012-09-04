@@ -798,6 +798,8 @@ define([
         // PERFORMANCE_IDEA:  Only combine these if showing the atmosphere.  Maybe this is too much of a micro-optimization.
         // http://jsperf.com/object-property-access-propcount
         this._drawUniforms = combine([uniforms, atmosphereUniforms], false, false);
+
+        this._depthQuad = new Array(12);
     };
 
     /**
@@ -1370,35 +1372,72 @@ define([
         return undefined;
     };
 
+    var _computeDepthQuadEUnit = new Cartesian3();
+    var _computeDepthQuadNUnit = new Cartesian3();
+    var _computeDepthQuadQ = new Cartesian3();
+    var _computeDepthQuadQUnit = new Cartesian3();
+    var _computeDepthQuadUpperLeft = new Cartesian3();
+    var _computeDepthQuadUpperRight = new Cartesian3();
+    var _computeDepthQuadLowerLeft = new Cartesian3();
+    var _computeDepthQuadLowerRight = new Cartesian3();
+
     CentralBody.prototype._computeDepthQuad = function(frameState) {
-        var radii = this._ellipsoid.getRadii();
-        var p = frameState.camera.getPositionWC();
+        var oneOverRadii = this._ellipsoid.getOneOverRadii();
+        var cameraPosition = frameState.camera.getPositionWC();
 
         // Find the corresponding position in the scaled space of the ellipsoid.
-        var q = this._ellipsoid.getOneOverRadii().multiplyComponents(p);
+        var q = Cartesian3.multiplyComponents(oneOverRadii, cameraPosition, _computeDepthQuadQ);
 
-        var qMagnitude = q.magnitude();
-        var qUnit = q.normalize();
+        var qMagnitude = Cartesian3.magnitude(q);
+        var qUnit = Cartesian3.normalize(q, _computeDepthQuadQUnit);
 
         // Determine the east and north directions at q.
-        var eUnit = Cartesian3.UNIT_Z.cross(q).normalize();
-        var nUnit = qUnit.cross(eUnit).normalize();
+        var eUnit = _computeDepthQuadEUnit;
+        Cartesian3.normalize(Cartesian3.cross(Cartesian3.UNIT_Z, q, eUnit), eUnit);
+        var nUnit = _computeDepthQuadNUnit;
+        Cartesian3.normalize(Cartesian3.cross(qUnit, eUnit, nUnit), nUnit);
 
         // Determine the radius of the 'limb' of the ellipsoid.
-        var wMagnitude = Math.sqrt(q.magnitudeSquared() - 1.0);
+        var wMagnitude = Math.sqrt(Cartesian3.magnitudeSquared(q) - 1.0);
 
         // Compute the center and offsets.
-        var center = qUnit.multiplyByScalar(1.0 / qMagnitude);
         var scalar = wMagnitude / qMagnitude;
-        var eastOffset = eUnit.multiplyByScalar(scalar);
-        var northOffset = nUnit.multiplyByScalar(scalar);
+        var center = Cartesian3.multiplyByScalar(qUnit, 1.0 / qMagnitude, qUnit); //qUnit now center
+        var eastOffset = Cartesian3.multiplyByScalar(eUnit, scalar, eUnit); //eUnit now eastOffset
+        var northOffset = Cartesian3.multiplyByScalar(nUnit, scalar, nUnit); //nUnit now northOffset
 
         // A conservative measure for the longitudes would be to use the min/max longitudes of the bounding frustum.
-        var upperLeft = radii.multiplyComponents(center.add(northOffset).subtract(eastOffset));
-        var upperRight = radii.multiplyComponents(center.add(northOffset).add(eastOffset));
-        var lowerLeft = radii.multiplyComponents(center.subtract(northOffset).subtract(eastOffset));
-        var lowerRight = radii.multiplyComponents(center.subtract(northOffset).add(eastOffset));
-        return [upperLeft.x, upperLeft.y, upperLeft.z, lowerLeft.x, lowerLeft.y, lowerLeft.z, upperRight.x, upperRight.y, upperRight.z, lowerRight.x, lowerRight.y, lowerRight.z];
+        var radii = this._ellipsoid.getRadii();
+
+        var upperLeft = Cartesian3.add(center, northOffset, _computeDepthQuadUpperLeft);
+        Cartesian3.subtract(upperLeft, eastOffset, upperLeft);
+        Cartesian3.multiplyComponents(radii, upperLeft, upperLeft);
+
+        var upperRight = Cartesian3.add(center, northOffset, _computeDepthQuadUpperRight);
+        Cartesian3.add(upperRight, eastOffset, upperRight);
+        Cartesian3.multiplyComponents(radii, upperRight, upperRight);
+
+        var lowerLeft = Cartesian3.subtract(center, northOffset, _computeDepthQuadLowerLeft);
+        Cartesian3.subtract(lowerLeft, eastOffset, lowerLeft);
+        Cartesian3.multiplyComponents(radii, lowerLeft, lowerLeft);
+
+        var lowerRight = Cartesian3.subtract(center, northOffset, _computeDepthQuadLowerRight);
+        Cartesian3.add(lowerRight, eastOffset, lowerRight);
+        Cartesian3.multiplyComponents(radii, lowerRight, lowerRight);
+
+        var depthQuad = this._depthQuad;
+        depthQuad[0] = upperLeft.x;
+        depthQuad[1] = upperLeft.y;
+        depthQuad[2] = upperLeft.z;
+        depthQuad[3] = lowerLeft.x;
+        depthQuad[4] = lowerLeft.y;
+        depthQuad[5] = lowerLeft.z;
+        depthQuad[6] = upperRight.x;
+        depthQuad[7] = upperRight.y;
+        depthQuad[8] = upperRight.z;
+        depthQuad[9] = lowerRight.x;
+        depthQuad[10] = lowerRight.y;
+        depthQuad[11] = lowerRight.z;
     };
 
     CentralBody.prototype._computePoleQuad = function(frameState, maxLat, maxGivenLat, viewProjMatrix, viewportTransformation) {
@@ -1782,7 +1821,8 @@ define([
         this._rsDepth.cull.enabled = cull;
 
         // update scisor/depth plane
-        var depthQuad = this._computeDepthQuad(frameState);
+        this._computeDepthQuad(frameState);
+        var depthQuad = this._depthQuad;
 
         // TODO: Re-enable scissor test.
         /*var scissorTest = { enabled : false };
